@@ -173,8 +173,25 @@ const sendMessage = async (req, res) => {
       { path: "replyTo", select: "content sender" },
     ]);
 
-    // TODO: Emit real-time event via Socket.IO
-    // io.to(taskId).emit('newMessage', message);
+    // Emit real-time event via Socket.IO
+    const io = req.app.get("io");
+    if (io) {
+      // Emit to task room
+      io.to(`task_${taskId}`).emit("new_message", {
+        taskId,
+        message,
+      });
+
+      // Emit to receiver specifically for notifications
+      io.to(`user_${receiverId}`).emit("notification", {
+        type: "new_message",
+        taskId,
+        message: `New message from ${message.sender.firstName}`,
+        data: message,
+      });
+
+      console.log(`📨 Message sent via Socket.IO to task_${taskId}`);
+    }
 
     res.status(201).json({
       success: true,
@@ -268,8 +285,17 @@ const editMessage = async (req, res) => {
       { path: "receiver", select: "firstName lastName avatar" },
     ]);
 
-    // TODO: Emit real-time event via Socket.IO
-    // io.to(message.task.toString()).emit('messageEdited', message);
+    // Emit real-time event via Socket.IO
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`task_${message.task.toString()}`).emit("message_edited", {
+        taskId: message.task.toString(),
+        messageId: message._id,
+        message,
+      });
+
+      console.log(`✏️ Message edited via Socket.IO for task_${message.task}`);
+    }
 
     res.status(200).json({
       success: true,
@@ -319,8 +345,16 @@ const deleteMessage = async (req, res) => {
       await deleteFile(filePath);
     }
 
-    // TODO: Emit real-time event via Socket.IO
-    // io.to(message.task.toString()).emit('messageDeleted', { messageId: message._id });
+    // Emit real-time event via Socket.IO
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`task_${message.task.toString()}`).emit("message_deleted", {
+        taskId: message.task.toString(),
+        messageId: message._id,
+      });
+
+      console.log(`🗑️ Message deleted via Socket.IO for task_${message.task}`);
+    }
 
     res.status(200).json({
       success: true,
@@ -376,8 +410,19 @@ const addReaction = async (req, res) => {
     // Add reaction
     await message.addReaction(req.user.id, emoji);
 
-    // TODO: Emit real-time event via Socket.IO
-    // io.to(message.task.toString()).emit('reactionAdded', { messageId: message._id, emoji, userId: req.user.id });
+    // Emit real-time event via Socket.IO
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`task_${message.task.toString()}`).emit("reaction_added", {
+        taskId: message.task.toString(),
+        messageId: message._id,
+        emoji,
+        userId: req.user.id,
+        reactions: message.reactions,
+      });
+
+      console.log(`😀 Reaction added via Socket.IO for task_${message.task}`);
+    }
 
     res.status(200).json({
       success: true,
@@ -423,8 +468,18 @@ const removeReaction = async (req, res) => {
     // Remove reaction
     await message.removeReaction(req.user.id);
 
-    // TODO: Emit real-time event via Socket.IO
-    // io.to(message.task.toString()).emit('reactionRemoved', { messageId: message._id, userId: req.user.id });
+    // Emit real-time event via Socket.IO
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`task_${message.task.toString()}`).emit("reaction_removed", {
+        taskId: message.task.toString(),
+        messageId: message._id,
+        userId: req.user.id,
+        reactions: message.reactions,
+      });
+
+      console.log(`😐 Reaction removed via Socket.IO for task_${message.task}`);
+    }
 
     res.status(200).json({
       success: true,
@@ -534,6 +589,20 @@ const markConversationAsRead = async (req, res) => {
         readAt: new Date(),
       }
     );
+
+    // Emit read status update via Socket.IO
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`task_${taskId}`).emit("conversation_read", {
+        taskId,
+        userId: req.user.id,
+        markedCount: result.modifiedCount,
+      });
+
+      console.log(
+        `📖 Conversation marked as read via Socket.IO for task_${taskId}`
+      );
+    }
 
     res.status(200).json({
       success: true,
@@ -723,9 +792,9 @@ const getChatStats = async (req, res) => {
               $match: {
                 $expr: {
                   $and: [
-                    { $eq: ["$task", "$taskId"] },
+                    { $eq: ["$task", "$$taskId"] },
                     { $eq: ["$sender", userId] },
-                    { $gt: ["$createdAt", "$msgTime"] },
+                    { $gt: ["$createdAt", "$$msgTime"] },
                   ],
                 },
               },
@@ -889,6 +958,236 @@ const downloadFile = async (req, res) => {
   }
 };
 
+// Socket.IO event handlers for real-time chat
+const handleSocketEvents = (io) => {
+  console.log("🔌 Setting up Socket.IO chat event handlers");
+
+  io.on("connection", (socket) => {
+    console.log(`👤 User connected: ${socket.id}`);
+
+    // Handle user authentication
+    socket.on("authenticate", (data) => {
+      try {
+        const { token, userId } = data;
+
+        // Verify token here (you might want to use your auth middleware logic)
+        if (token && userId) {
+          socket.userId = userId;
+          socket.join(`user_${userId}`);
+
+          // Emit user online status
+          socket.broadcast.emit("user_online", { userId });
+
+          console.log(
+            `✅ User ${userId} authenticated and joined personal room`
+          );
+        }
+      } catch (error) {
+        console.error("Authentication error:", error);
+        socket.emit("auth_error", { message: "Authentication failed" });
+      }
+    });
+
+    // Handle joining task rooms
+    socket.on("join_room", (data) => {
+      try {
+        const { room } = data;
+        socket.join(room);
+        console.log(`🏠 Socket ${socket.id} joined room: ${room}`);
+
+        // Notify others in the room
+        socket.to(room).emit("user_joined_room", {
+          userId: socket.userId,
+          room,
+        });
+      } catch (error) {
+        console.error("Join room error:", error);
+      }
+    });
+
+    // Handle leaving task rooms
+    socket.on("leave_room", (data) => {
+      try {
+        const { room } = data;
+        socket.leave(room);
+        console.log(`🚪 Socket ${socket.id} left room: ${room}`);
+
+        // Notify others in the room
+        socket.to(room).emit("user_left_room", {
+          userId: socket.userId,
+          room,
+        });
+      } catch (error) {
+        console.error("Leave room error:", error);
+      }
+    });
+
+    // Handle typing indicators
+    socket.on("user_typing", (data) => {
+      try {
+        const { taskId } = data;
+        if (taskId && socket.userId) {
+          socket.to(`task_${taskId}`).emit("user_typing", {
+            taskId,
+            userId: socket.userId,
+          });
+        }
+      } catch (error) {
+        console.error("Typing indicator error:", error);
+      }
+    });
+
+    socket.on("user_stopped_typing", (data) => {
+      try {
+        const { taskId } = data;
+        if (taskId && socket.userId) {
+          socket.to(`task_${taskId}`).emit("user_stopped_typing", {
+            taskId,
+            userId: socket.userId,
+          });
+        }
+      } catch (error) {
+        console.error("Stop typing indicator error:", error);
+      }
+    });
+
+    // Handle message sent acknowledgments
+    socket.on("message_sent", (data) => {
+      try {
+        const { taskId, message } = data;
+
+        // Broadcast to others in the task room (exclude sender)
+        socket.to(`task_${taskId}`).emit("new_message", {
+          taskId,
+          message,
+        });
+
+        console.log(
+          `📨 Message broadcast to task_${taskId} from ${socket.userId}`
+        );
+      } catch (error) {
+        console.error("Message sent broadcast error:", error);
+      }
+    });
+
+    // Handle message edited acknowledgments
+    socket.on("message_edited", (data) => {
+      try {
+        const { taskId, messageId, message } = data;
+
+        socket.to(`task_${taskId}`).emit("message_edited", {
+          taskId,
+          messageId,
+          message,
+        });
+
+        console.log(`✏️ Message edit broadcast to task_${taskId}`);
+      } catch (error) {
+        console.error("Message edit broadcast error:", error);
+      }
+    });
+
+    // Handle message deleted acknowledgments
+    socket.on("message_deleted", (data) => {
+      try {
+        const { taskId, messageId } = data;
+
+        socket.to(`task_${taskId}`).emit("message_deleted", {
+          taskId,
+          messageId,
+        });
+
+        console.log(`🗑️ Message delete broadcast to task_${taskId}`);
+      } catch (error) {
+        console.error("Message delete broadcast error:", error);
+      }
+    });
+
+    // Handle reaction acknowledgments
+    socket.on("reaction_added", (data) => {
+      try {
+        const { taskId, messageId, emoji, reactions } = data;
+
+        socket.to(`task_${taskId}`).emit("reaction_added", {
+          taskId,
+          messageId,
+          emoji,
+          reactions,
+        });
+
+        console.log(`😀 Reaction added broadcast to task_${taskId}`);
+      } catch (error) {
+        console.error("Reaction added broadcast error:", error);
+      }
+    });
+
+    socket.on("reaction_removed", (data) => {
+      try {
+        const { taskId, messageId, reactions } = data;
+
+        socket.to(`task_${taskId}`).emit("reaction_removed", {
+          taskId,
+          messageId,
+          reactions,
+        });
+
+        console.log(`😐 Reaction removed broadcast to task_${taskId}`);
+      } catch (error) {
+        console.error("Reaction removed broadcast error:", error);
+      }
+    });
+
+    // Handle notification acknowledgments
+    socket.on("mark_notification_read", (data) => {
+      try {
+        const { notificationId } = data;
+
+        if (socket.userId) {
+          // You can add logic here to update notification status in database
+          console.log(
+            `📖 Notification ${notificationId} marked as read by ${socket.userId}`
+          );
+        }
+      } catch (error) {
+        console.error("Mark notification read error:", error);
+      }
+    });
+
+    socket.on("mark_all_notifications_read", () => {
+      try {
+        if (socket.userId) {
+          // You can add logic here to mark all notifications as read in database
+          console.log(
+            `📖 All notifications marked as read by ${socket.userId}`
+          );
+        }
+      } catch (error) {
+        console.error("Mark all notifications read error:", error);
+      }
+    });
+
+    // Handle disconnect
+    socket.on("disconnect", (reason) => {
+      console.log(`👋 User disconnected: ${socket.id}, reason: ${reason}`);
+
+      if (socket.userId) {
+        // Emit user offline status
+        socket.broadcast.emit("user_offline", {
+          userId: socket.userId,
+          lastSeen: new Date().toISOString(),
+        });
+
+        console.log(`📴 User ${socket.userId} marked as offline`);
+      }
+    });
+
+    // Handle connection errors
+    socket.on("error", (error) => {
+      console.error(`Socket error for ${socket.id}:`, error);
+    });
+  });
+};
+
 module.exports = {
   getConversation,
   sendMessage,
@@ -903,4 +1202,5 @@ module.exports = {
   getMessage,
   getChatStats,
   downloadFile,
+  handleSocketEvents, // Export socket event handler
 };
