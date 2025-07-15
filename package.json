@@ -13,7 +13,13 @@
     "build": "cd client && npm run build",
     "start": "cd server && npm start"
   },
-  "keywords": ["task", "auction", "bidding", "students", "campus"],
+  "keywords": [
+    "task",
+    "auction",
+    "bidding",
+    "students",
+    "campus"
+  ],
   "author": "TaskAuction Team",
   "license": "MIT",
   "devDependencies": {
